@@ -1,150 +1,194 @@
+import { and, eq, or } from "drizzle-orm";
 import db from "../drizzle/db";
-import { eq, and } from "drizzle-orm";
-import { roleEnum, users, TselectUser,TinsertUser, yearEnum } from "../drizzle/schema";
+import { TSelectUser, users, properties } from "../drizzle/schema";
+import bcrypt from "bcrypt";
+import { sendNotificationEmail } from "../middlewares/GoogleMAiler";
+
+const SALT_ROUNDS = 10;
+const OTP_EXPIRY_MINUTES = 10;
+const MAX_ATTEMPTS = 5;
 
 // ================================
-// Register a new student
+// 1. Registration
 // ================================
 export const registerUserService = async (
-  studentRegNo: string,
-  email: string, // Now accepting email from controller
-  password: string, // Hashed password passed from controller
-  role?: typeof roleEnum.enumValues[number]
-): Promise<TinsertUser> => {
-  const newRole = role || "member";
-
-  const [newUser] = await db.insert(users)
-    .values({
-      studentRegNo,
-      password: password, // Already hashed in controller
-      role: newRole,
-      fullName: studentRegNo, 
-      yearOfStudy: "1",       
-      email: email, // Using provided email
-      isActive: true,
-      isGoodStanding: true,
-      isLocked: false,
-    })
-    .returning();
-
-  if (!newUser) throw new Error("Failed to create user");
-
-  return newUser;
-};
-
-// ================================
-// Login service
-// ================================
-export const loginUserService = async (
-  studentRegNo: string,
-  password: string // Plain password for comparison
-): Promise<TselectUser> => {
-  const user = await db.query.users.findFirst({
-    where: eq(users.studentRegNo, studentRegNo),
-  });
-
-  if (!user) throw new Error("User not found");
-
-  // This still needs to stay here to verify the user during login
-  const bcrypt = await import("bcrypt");
-  const validPassword = await bcrypt.compare(password, user.password);
-  if (!validPassword) throw new Error("Invalid password");
-
-  // Track login activity
-  await db.update(users)
-    .set({ lastLoginAt: new Date() })
-    .where(eq(users.id, user.id));
-
-  return user; 
-};
-
-// ================================
-// Complete profile
-// ================================
-export const completeStudentProfileService = async (
-  studentRegNo: string,
+  username: string,
+  email: string,
+  password: string,
   fullName: string,
-  yearOfStudy: typeof yearEnum.enumValues[number],
-  email: string
-): Promise<TinsertUser> => {
-  const [updatedUser] = await db.update(users)
-    .set({
-      fullName,
-      yearOfStudy,
+  phoneNumber: string,
+  role: 'admin' | 'landlord' | 'caretaker' | 'tenant' = 'tenant',
+  hostelId?: string
+): Promise<{ user: TSelectUser; otp: string }> => {
+  
+  if (role === 'tenant') {
+    if (!hostelId) throw new Error("Tenants must be assigned to a hostel.");
+    const hostel = await db.query.properties.findFirst({ where: eq(properties.id, hostelId) });
+    if (!hostel) throw new Error("Invalid hostel selected.");
+  }
+
+  const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
+  const rawOtp = Math.floor(100000 + Math.random() * 900000).toString();
+  const hashedOtp = await bcrypt.hash(rawOtp, SALT_ROUNDS);
+
+  const result = await db.insert(users)
+    .values({
+      username,
       email,
+      fullName,
+      phoneNumber,
+      passwordHash: hashedPassword,
+      role,
+      hostelId: hostelId || null,
+      isActive: true,
+      isVerified: false,
+      otpHash: hashedOtp,
+      otpExpiresAt: new Date(Date.now() + OTP_EXPIRY_MINUTES * 60000),
     })
-    .where(eq(users.studentRegNo, studentRegNo))
     .returning();
 
-  if (!updatedUser) throw new Error("Failed to update profile");
-
-  return updatedUser;
+  const newUser = (result as any[])[0]; 
+  if (!newUser) throw new Error("Failed to create user.");
+  return { user: newUser as TSelectUser, otp: rawOtp };
 };
 
 // ================================
-// Forgot Password Service
+// 2. Email Verification
 // ================================
-export const forgotPasswordService = async (
-  studentRegNo: string,
-  email: string
-): Promise<string> => {
+export const verifyRegistrationService = async (userId: string, providedOtp: string): Promise<string> => {
+  const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
+  if (!user || !user.otpHash || !user.otpExpiresAt || new Date() > user.otpExpiresAt) {
+    throw new Error("Invalid or expired session.");
+  }
+
+  const isValid = await bcrypt.compare(providedOtp, user.otpHash);
+  if (!isValid) throw new Error("Invalid verification code.");
+
+  await db.update(users)
+    .set({ isVerified: true, otpHash: null, otpExpiresAt: null, updatedAt: new Date() })
+    .where(eq(users.id, userId));
+
+  return "Account verified successfully.";
+};
+
+// ================================
+// 3. Login
+// ================================
+export const loginUserService = async (identifier: string, password: string): Promise<TSelectUser> => {
   const user = await db.query.users.findFirst({
-    where: and(
-      eq(users.studentRegNo, studentRegNo),
-      eq(users.email, email)
+    where: or(
+      eq(users.username, identifier),
+      eq(users.email, identifier),
+      eq(users.phoneNumber, identifier)
     ),
   });
 
-  if (!user) throw new Error("No matching user found with those credentials.");
+  if (!user || !user.isActive) throw new Error("Invalid credentials or account inactive.");
 
-  return "Identity verified. You may now proceed to reset your password.";
+  if (user.lockedUntil && user.lockedUntil > new Date()) {
+    throw new Error("Account locked. Try again later.");
+  }
+
+  const validPassword = await bcrypt.compare(password, user.passwordHash ?? "");
+  if (!validPassword) throw new Error("Invalid credentials.");
+
+  await db.update(users)
+    .set({ lastLogin: new Date(), otpAttempts: 0, updatedAt: new Date() })
+    .where(eq(users.id, user.id));
+
+  return user;
 };
 
 // ================================
-// Reset Password Service
+// 4. Password Management
 // ================================
-export const resetPasswordService = async (
-  studentRegNo: string,
-  newPassword: string // Hashed password passed from controller
-): Promise<string> => {
-  const [updated] = await db.update(users)
-    .set({ 
-      password: newPassword, // Use hashed password
-      isLocked: false,
-      failedLoginAttempts: 0 
-    })
-    .where(eq(users.studentRegNo, studentRegNo))
-    .returning();
-
-  if (!updated) throw new Error("User not found or reset failed");
-
-  return "Password has been reset successfully.";
-};
-
-// ================================
-// Get user by registration number
-// ================================
-export const getUserByRegNoService = async (
-  studentRegNo: string
-): Promise<TselectUser | undefined> => {
-  return db.query.users.findFirst({
-    where: eq(users.studentRegNo, studentRegNo),
+export const forgotPasswordService = async (identifier: string): Promise<{ userId: string, otp: string }> => {
+  const user = await db.query.users.findFirst({
+    where: or(
+      eq(users.username, identifier),
+      eq(users.email, identifier),
+      eq(users.phoneNumber, identifier)
+    ),
   });
+  if (!user) throw new Error("User not found.");
+
+  const rawOtp = Math.floor(100000 + Math.random() * 900000).toString();
+  await db.update(users).set({ 
+    otpHash: await bcrypt.hash(rawOtp, SALT_ROUNDS), 
+    otpExpiresAt: new Date(Date.now() + OTP_EXPIRY_MINUTES * 60000),
+    updatedAt: new Date() 
+  }).where(eq(users.id, user.id));
+
+  return { userId: user.id, otp: rawOtp };
+};
+
+export const resetPasswordService = async (userId: string, providedOtp: string, newPassword: string): Promise<string> => {
+  const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
+  if (!user || !user.otpHash || new Date() > (user.otpExpiresAt || new Date(0))) throw new Error("Invalid session.");
+
+  const isValid = await bcrypt.compare(providedOtp, user.otpHash);
+  if (!isValid) {
+    const newAttempts = (user.otpAttempts || 0) + 1;
+    if (newAttempts >= MAX_ATTEMPTS) {
+      await db.update(users).set({ lockedUntil: new Date(Date.now() + 15 * 60000) }).where(eq(users.id, userId));
+      throw new Error("Too many failed attempts. Account locked.");
+    }
+    await db.update(users).set({ otpAttempts: newAttempts }).where(eq(users.id, userId));
+    throw new Error("Invalid OTP.");
+  }
+
+  await db.update(users).set({ 
+    passwordHash: await bcrypt.hash(newPassword, SALT_ROUNDS), 
+    otpHash: null, otpExpiresAt: null, otpAttempts: 0, updatedAt: new Date() 
+  }).where(eq(users.id, userId));
+
+  return "Password reset successfully.";
+};
+
+export const updatePasswordService = async (userId: string, currentPassword: string, newPassword: string): Promise<string> => {
+  const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
+  if (!user || !user.passwordHash) throw new Error("User not found.");
+
+  const isMatch = await bcrypt.compare(currentPassword, user.passwordHash);
+  if (!isMatch) throw new Error("Incorrect current password.");
+
+  await db.update(users).set({ 
+    passwordHash: await bcrypt.hash(newPassword, SALT_ROUNDS), 
+    updatedAt: new Date() 
+  }).where(eq(users.id, userId));
+
+  return "Password updated successfully.";
 };
 
 // ================================
-// Update password (Authenticated)
+// 5. Admin Account Management
 // ================================
-export const updateUserPasswordService = async (
-  studentRegNo: string,
-  newPassword: string // Hashed password passed from controller
-): Promise<string> => {
-  const [updated] = await db.update(users)
-    .set({ password: newPassword }) // Use hashed password
-    .where(eq(users.studentRegNo, studentRegNo))
-    .returning();
+export const deactivateUser = async (adminId: string, targetUserId: string): Promise<string> => {
+  const admin = await db.query.users.findFirst({ where: eq(users.id, adminId) });
+  if (admin?.role !== 'admin') throw new Error("Unauthorized.");
+  await db.update(users).set({ isActive: false, updatedAt: new Date() }).where(eq(users.id, targetUserId));
+  await sendNotificationEmail((await db.query.users.findFirst({where: eq(users.id, targetUserId)}))?.email || "", "Account Deactivated", "Your account has been deactivated by an administrator.", "alert");
+  return "User account deactivated.";
+};
 
-  if (!updated) throw new Error("User not found or password update failed");
+export const activateUser = async (adminId: string, targetUserId: string): Promise<string> => {
+  const admin = await db.query.users.findFirst({ where: eq(users.id, adminId) });
+  if (admin?.role !== 'admin') throw new Error("Unauthorized.");
+  await db.update(users).set({ isActive: true, updatedAt: new Date() }).where(eq(users.id, targetUserId));
+  return "User account activated.";
+};
 
-  return "Password updated successfully";
+export const deleteUser = async (adminId: string, targetUserId: string): Promise<string> => {
+  const admin = await db.query.users.findFirst({ where: eq(users.id, adminId) });
+  if (admin?.role !== 'admin') throw new Error("Unauthorized.");
+  const result = await db.delete(users).where(eq(users.id, targetUserId));
+  if (result.rowCount === 0) throw new Error("User not found.");
+  return "User account permanently deleted.";
+};
+
+export const adminUnlockUserService = async (adminId: string, targetUserId: string): Promise<string> => {
+  const admin = await db.query.users.findFirst({ where: eq(users.id, adminId) });
+  if (admin?.role !== 'admin') throw new Error("Unauthorized.");
+  await db.update(users).set({ lockedUntil: null, otpAttempts: 0, updatedAt: new Date() }).where(eq(users.id, targetUserId));
+  return "Account unlocked successfully.";
 };

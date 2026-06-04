@@ -1,20 +1,14 @@
-import nodemailer from "nodemailer";
+import nodemailer, { Transporter } from "nodemailer";
 import dotenv from "dotenv";
+
 dotenv.config();
 
-// 1. UPDATED: Added "account-closure" to the union type
-type EmailType = 
-  | "welcome" 
-  | "credentials" 
-  | "password-reset" 
-  | "password-update" 
-  | "vote-confirmation" 
-  | "alert" 
-  | "generic"
-  | "unlock-code"
-  | "account-closure"; // Added for account deletion
+// Configuration validation
+if (!process.env.EMAIL_SENDER || !process.env.EMAIL_PASSWORD) {
+  throw new Error("❌ Missing EMAIL_SENDER or EMAIL_PASSWORD in environment variables.");
+}
 
-const transporter = nodemailer.createTransport({
+const transporter: Transporter = nodemailer.createTransport({
   service: "gmail",
   host: "smtp.gmail.com",
   port: 465,
@@ -25,97 +19,80 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-const PLATFORM_NAME = "Computing and Innovation Club of Laikipia University";
+const PLATFORM_NAME = "Hostel Manager 2026";
+
+export type EmailType = 
+  | "welcome" | "credentials" | "password-reset" | "password-update" 
+  | "alert" | "generic" | "unlock-code" | "profile-success" 
+  | "account-closure" | "registration-verification";
+
+interface Theme { color: string; icon: string; label: string; }
+
+const themes: Record<EmailType, Theme> = {
+  welcome:           { color: "#1e3a8a", icon: "🎓", label: "Welcome" },
+  credentials:       { color: "#1e3a8a", icon: "🔐", label: "Security Access" },
+  "password-reset":  { color: "#d97706", icon: "🔄", label: "Recovery Request" },
+  "password-update": { color: "#059669", icon: "🛡️", label: "Security Update" },
+  alert:             { color: "#dc2626", icon: "⚠️", label: "Security Alert" },
+  generic:           { color: "#475569", icon: "📢", label: "Notification" },
+  "unlock-code":     { color: "#7c3aed", icon: "🔑", label: "Account Unlock" },
+  "profile-success": { color: "#10b981", icon: "✅", label: "Success" },
+  "account-closure": { color: "#4b5563", icon: "🚫", label: "Status Update" },
+  "registration-verification": { color: "#2563eb", icon: "✉️", label: "Email Verification" },
+};
+
+/**
+ * Generates a clean, modern HTML template.
+ */
+const generateTemplate = (message: string, theme: Theme) => `
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f8fafc; margin: 0; padding: 20px; }
+      .card { max-width: 500px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+      .header { background: ${theme.color}; padding: 30px; text-align: center; color: white; }
+      .content { padding: 40px 30px; text-align: center; }
+      .icon { font-size: 48px; margin-bottom: 20px; }
+      .label { font-size: 12px; font-weight: 800; color: #94a3b8; text-transform: uppercase; letter-spacing: 2px; }
+      .body-text { margin: 25px 0; font-size: 16px; color: #334155; line-height: 1.6; }
+      .footer { padding: 20px; text-align: center; font-size: 12px; color: #94a3b8; border-top: 1px solid #f1f5f9; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="header"><h1>${PLATFORM_NAME}</h1></div>
+      <div class="content">
+        <div class="icon">${theme.icon}</div>
+        <div class="label">${theme.label}</div>
+        <div class="body-text">${message}</div>
+      </div>
+      <div class="footer">© ${new Date().getFullYear()} ${PLATFORM_NAME}. All rights reserved.</div>
+    </div>
+  </body>
+</html>
+`;
 
 export const sendNotificationEmail = async (
-  email: string,
+  to: string,
   subject: string,
   message: string,
-  html?: string,
   type: EmailType = "generic"
-): Promise<string> => {
+): Promise<{ success: boolean; message: string }> => {
   try {
-    // 2. UPDATED: Added account-closure theme
-    const themes: Record<EmailType, { color: string; icon: string; label: string }> = {
-      welcome:           { color: "#003366", icon: "🎓", label: "WELCOME" },
-      credentials:       { color: "#003366", icon: "🔐", label: "ACCESS KEYS" },
-      "password-reset":  { color: "#D97706", icon: "🔄", label: "RECOVERY" },
-      "password-update": { color: "#059669", icon: "🛡️", label: "SECURITY" },
-      "vote-confirmation": { color: "#2563EB", icon: "🗳️", label: "VOTE CAST" },
-      alert:             { color: "#DC2626", icon: "⚠️", label: "SECURITY ALERT" },
-      generic:           { color: "#003366", icon: "📢", label: "NOTICE" },
-      "unlock-code":     { color: "#7C3AED", icon: "🔑", label: "ACCOUNT UNLOCK" },
-      "account-closure": { color: "#4B5563", icon: "🚫", label: "ACCOUNT CLOSED" }, // Gray theme for deletion
-    };
-
     const theme = themes[type] || themes.generic;
 
-    const defaultHtml = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="utf-8">
-      <style>
-        .container { max-width: 600px; margin: 0 auto; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1f2937; background-color: #f9fafb; padding: 20px; }
-        .card { background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); border: 1px solid #e5e7eb; }
-        .header { background-color: ${theme.color}; padding: 30px 20px; text-align: center; }
-        .header h1 { color: #ffffff; margin: 0; font-size: 18px; text-transform: uppercase; letter-spacing: 2px; }
-        .content { padding: 40px 30px; }
-        .badge { display: inline-block; padding: 4px 12px; border-radius: 20px; background-color: ${theme.color}20; color: ${theme.color}; font-size: 12px; font-weight: bold; margin-bottom: 20px; }
-        .message { line-height: 1.6; font-size: 15px; color: #374151; }
-        .footer { padding: 20px; text-align: center; font-size: 12px; color: #9ca3af; background-color: #f3f4f6; }
-        .btn-box { margin-top: 30px; padding: 20px; background-color: #f8fafc; border-radius: 8px; border: 1px dashed #cbd5e1; text-align: center; }
-        .highlight { color: ${theme.color}; font-weight: bold; }
-        
-        .reset-button {
-          display: inline-block;
-          background-color: ${theme.color};
-          color: #ffffff !important;
-          padding: 12px 24px;
-          text-decoration: none;
-          border-radius: 8px;
-          font-weight: bold;
-          font-size: 14px;
-          margin: 20px 0;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="card">
-          <div class="header">
-            <h1>${PLATFORM_NAME}</h1>
-          </div>
-          <div class="content">
-            <div class="badge">${theme.icon} ${theme.label}</div>
-            <div class="message">
-              ${message}
-            </div>
-            <p style="margin-top: 25px; font-size: 13px; color: #6b7280;">
-              If you have any issues, please contact the technical team.
-            </p>
-          </div>
-          <div class="footer">
-            <strong>Laikipia University</strong><br>
-            Computing & Innovation Voting System &copy; ${new Date().getFullYear()}
-          </div>
-        </div>
-      </div>
-    </body>
-    </html>
-    `;
-
-    const mailOptions = {
+    await transporter.sendMail({
       from: `"${PLATFORM_NAME}" <${process.env.EMAIL_SENDER}>`,
-      to: email,
-      subject: `${subject} | LU Voting`,
-      html: html || defaultHtml,
-    };
+      to,
+      subject: `${subject} | ${PLATFORM_NAME}`,
+      html: generateTemplate(message, theme),
+    });
 
-    const info = await transporter.sendMail(mailOptions);
-    return info.accepted?.length ? "✅ Email sent" : "⚠️ Email not sent";
+    return { success: true, message: "Email sent successfully" };
   } catch (error: any) {
-    console.error("Email Error:", error);
-    return `❌ Email error: ${error.message}`;
+    console.error("❌ Email Service Error:", error);
+    return { success: false, message: error.message };
   }
 };

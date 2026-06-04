@@ -2,13 +2,20 @@ import { Router } from "express";
 import {
   registerUser,
   loginUser,
-  completeProfile,
-  updatePassword,
   forgotPassword,
   resetPassword,
-  getUserByRegNo,
+  updatePassword,
+  adminUnlockUser,
+  adminDeactivateUser,
+  adminActivateUser,
+  adminDeleteUser,
+  verifyRegistration,
 } from "./Auth.controller";
-import { anyAuthenticatedUser } from "../middlewares/bearAuth";
+import { 
+  anyAuthenticatedUser, 
+  adminAuth 
+} from "../middlewares/bearAuth"; 
+import { checkAccountStatus } from "../middlewares/checkStatus"; // Adjust path as needed
 
 const AuthRouter = Router();
 
@@ -16,29 +23,34 @@ const AuthRouter = Router();
 // Public Routes
 // -------------------------------
 
-// Register a new user (Password defaults to studentRegNo if not provided)
 AuthRouter.post("/register", registerUser);
-
-// Login (Returns token and profile completion status)
 AuthRouter.post("/login", loginUser);
-
-// Forgot Password (Verify identity via Reg No and Email)
+AuthRouter.post("/verify-registration", verifyRegistration);
 AuthRouter.post("/forgot-password", forgotPassword);
-
-// Reset Password (Final step after identity verification)
 AuthRouter.post("/reset-password", resetPassword);
 
 // -------------------------------
-// Protected Routes (require JWT auth)
+// Protected Routes (User)
 // -------------------------------
 
-// Update password (Uses studentRegNo from the decoded JWT)
-AuthRouter.put("/update-password", anyAuthenticatedUser, updatePassword);
+// checkAccountStatus ensures the user is active/verified before they can update their password
+AuthRouter.put(
+  "/update-password", 
+  anyAuthenticatedUser, 
+  checkAccountStatus, 
+  updatePassword
+);
 
-// Complete profile (Used after first login to update name/year/email)
-AuthRouter.put("/complete-profile", anyAuthenticatedUser, completeProfile);
+// -------------------------------
+// Protected Routes (Admin)
+// -------------------------------
 
-// Get user by registration number: ?studentRegNo=SC/COM/0008/22
-AuthRouter.get("/user/by-reg-no", anyAuthenticatedUser, getUserByRegNo);
+// Admin routes remain protected by adminAuth. 
+// Note: You can optionally add checkAccountStatus here if you want admins 
+// to also be subject to active/verified checks.
+AuthRouter.put("/admin/unlock-user", adminAuth, adminUnlockUser);
+AuthRouter.put("/admin/deactivate-user", adminAuth, adminDeactivateUser);
+AuthRouter.put("/admin/activate-user", adminAuth, adminActivateUser);
+AuthRouter.delete("/admin/delete-user", adminAuth, adminDeleteUser);
 
 export default AuthRouter;

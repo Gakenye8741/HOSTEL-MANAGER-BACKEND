@@ -1,75 +1,126 @@
-import express, { Application, Response } from 'express';
+import express, { Application, Request, Response, NextFunction } from 'express';
 import dotenv from 'dotenv';
 import cors from "cors";
 import helmet from "helmet";
+import compression from 'compression'; 
+import hpp from 'hpp';
 import AuthRouter from './Auth/Auth.routes';
-import UsersRouter from './services/users/users.routes';
-import ElectionRouter from './services/elections/elections.route';
-import PositionsRouter from './services/Positions/position.routes';
-import CandidateApplicationsRouter from './services/Applications/candidateApplications.route';
-import CandidatesRouter from './services/candidates/candidates.routes';
-import VoterHistoryRouter from './services/Voter-History/voter-history.routes';
-import VotesRouter from './services/votes/votes.route';
+import { logger } from './middlewares/logger';
+import { authLimiter, globalLimiter } from './middlewares/RateLimiter';
 
 dotenv.config();
 
 const app: Application = express();
+const PORT = process.env.PORT || 5000;
 
-// --- CORS CONFIGURATION ---
-const allowedOrigins = [
-    'https://luvotingapp.netlify.app', 
-    'http://localhost:5000',
-    'http://localhost:5173'
-];
+// Security: Disable X-Powered-By header
+app.disable('x-powered-by');
 
-const corsOptions: cors.CorsOptions = {
-    origin: (origin, callback) => {
-        // Allow requests with no origin (like Postman or mobile apps)
-        if (!origin) return callback(null, true);
-        
-        if (allowedOrigins.includes(origin)) {
-            callback(null, true);
-        } else {
-            // Log for debugging on Render logs
-            console.error(`CORS Error: Origin ${origin} not allowed`);
-            callback(new Error('Not allowed by CORS'));
-        }
-    },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    credentials: true,
-    optionsSuccessStatus: 200 // Some legacy browsers choke on 204
-};
+// Enable if running behind a reverse proxy (Nginx, Render, Railway, etc.)
+app.set('trust proxy', 1);
 
-// --- MIDDLEWARE STACK ---
-// 1. CORS first to handle Preflight (OPTIONS) requests immediately
-app.use(cors(corsOptions)); 
+// ==========================================
+// 1. SECURITY & CORE MIDDLEWARE
+// ==========================================
 
-// 2. Helmet next, but we ensure it doesn't break our Cross-Origin needs
+// Security: Helmet with explicit CSP
 app.use(helmet({
-    crossOriginResourcePolicy: { policy: "cross-origin" }
+    contentSecurityPolicy: {
+        directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: ["'self'"],
+            styleSrc: ["'self'", "https:", "'unsafe-inline'"],
+            imgSrc: ["'self'", "data:", "https:"],
+            objectSrc: ["'none'"],
+            upgradeInsecureRequests: [],
+        },
+    },
 }));
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Security: Prevents HTTP Parameter Pollution attacks
+app.use(hpp());
 
-// Default route
-app.get('/', (req, res: Response) => {
-    res.send("CISLU App is running");
+// Performance: Gzip compression
+app.use(compression());
+
+// Logging: Custom Logger
+app.use(logger); 
+
+// CORS: Strict configuration
+app.use(cors({
+    origin: process.env.ALLOWED_ORIGINS?.split(',') || '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    credentials: true
+})); 
+
+// Request Parsing with strict size limits
+app.use(express.json({ limit: '10kb' })); 
+app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+
+// Security: Rate Limiting
+app.use('/api/', globalLimiter); 
+app.use('/api/auth', authLimiter);
+
+// ==========================================
+// 2. API ENDPOINTS
+// ==========================================
+
+// Pro Health Check
+app.get('/health', async (req: Request, res: Response) => {
+    // You can add a DB check here if desired
+    const health = {
+        service: "Hostel Manager 2026 API",
+        status: 'UP',
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString()
+    };
+    res.status(200).json(health);
 });
 
-// Routes
-app.use('/api/auth', AuthRouter); // Note: Removed trailing slashes for consistency
-app.use('/api/votes', VotesRouter);
-app.use('/api/users', UsersRouter);
-app.use('/api/voter-history', VoterHistoryRouter);
-app.use('/api/elections', ElectionRouter);
-app.use('/api/candidates', CandidatesRouter);
-app.use('/api/positions', PositionsRouter);
-app.use('/api/candidate-applications', CandidateApplicationsRouter);
+app.use('/api/auth', AuthRouter);
 
-// 404 handler
-app.use((req, res) => {
-    res.status(404).json({ error: "Route not found" });
+// ==========================================
+// 3. EXCEPTION HANDLING
+// ==========================================
+
+// Handle 404
+app.use((req: Request, res: Response) => {
+    res.status(404).json({ error: "Endpoint not found" });
 });
+
+// Global Error Handler
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+    if (process.env.NODE_ENV !== 'production') {
+        console.error(`[Global-Error] ${err.stack}`);
+    }
+    
+    res.status(500).json({ 
+        success: false,
+        error: "Internal Server Error",
+        message: process.env.NODE_ENV === 'production' ? "An unexpected error occurred" : err.message
+    });
+});
+
+// ==========================================
+// 4. SERVER INITIALIZATION & SHUTDOWN
+// ==========================================
+
+const server = app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
+});
+
+const gracefulShutdown = (signal: string) => {
+    console.log(`Received ${signal}. Shutting down gracefully...`);
+    server.close(() => {
+        console.log('HTTP server closed.');
+        process.exit(0);
+    });
+    
+    // Force close after 10s
+    setTimeout(() => process.exit(1), 10000);
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 export default app;
